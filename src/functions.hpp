@@ -9,11 +9,31 @@
 #include <fstream>
 #include <thread>
 #include <chrono>
-#include <conio.h>
 #include <map>
 #include <set>
 #include <cstdlib>
 #include <ctime>
+
+// Cross-platform non-blocking key input
+#if defined(__linux__) || defined(__APPLE__)
+    #include <termios.h>
+    #include <unistd.h>
+    #include <sys/select.h>
+
+    inline int _getch() {
+        struct termios oldt, newt;
+        int ch;
+        tcgetattr(STDIN_FILENO, &oldt);
+        newt = oldt;
+        newt.c_lflag &= ~(ICANON | ECHO);
+        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+        ch = getchar();
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+        return ch;
+    }
+#else
+    #include <conio.h>
+#endif
 
 // ANSI Colors
 #define RESET   "\033[0m"
@@ -24,13 +44,13 @@
 #define GREEN   "\033[32m"
 #define MAGENTA "\033[35m"
 
-// --- GLOBAL ECONOMY ---
+// Global game values
 inline int playerBalance = 1000; 
 inline int currentBet = 0;
 inline int pot = 0;
 inline int numCPUs = 1;
-inline int startingRank = 9; // FIX 5: global used by Deck and main game loop
-const int MAX_RAISES = 3; // Betting cap per round
+inline int startingRank = 9; 
+const int MAX_RAISES = 3;
 
 enum class Rank { TWO = 2, THREE, FOUR, FIVE, SIX, SEVEN, EIGHT, NINE, TEN, JACK, QUEEN, KING, ACE };
 enum class Symbol { SPADES = 1, CLUBS = 2, DIAMONDS = 3, HEART = 4 };
@@ -66,20 +86,19 @@ struct Card {
     }
 };
 
-// Forward declaration
 HandResult evaluateHand(std::vector<Card> hand, std::vector<Card> table);
 
-// --- TIMING UTILS ---
 inline void sleepMs(int ms) {
     std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 
 inline void sleepRandom() {
-    sleepMs(1000 + (rand() % 1000)); // 1-2 second delay
+    sleepMs(1000 + (rand() % 1000));
 }
 
-// --- VISUALS ---
-inline void clearScreen() { system("cls"); }
+inline void clearScreen() { 
+    std::cout << "\033[2J\033[1;1H"; 
+}
 
 inline void printHeader() {
     std::cout << MAGENTA << BOLD << R"(
@@ -92,7 +111,7 @@ inline void printHeader() {
   | | |  __| /   \ |  _  | `--. \ |  _  | | | | |   | | | | |  __|| |\/| |
   | | | |___/ /^\ \| | | |/\__/ / | | | \ \_/ / |___| |/ /  | |___| |  | |
   \_/ \____/\/   \/\_| |_/\____/  \_| |_/\___/\_____/___/   \____/\_|  |_/ )" << RESET << std::endl;
-        std::cout << MAGENTA << BOLD << R"(
+    std::cout << MAGENTA << BOLD << R"(
 ============================================================================
 ============================================================================)" << RESET << std::endl;
 }
@@ -100,28 +119,30 @@ inline void printHeader() {
 inline void bootingSequence() {
     std::srand(static_cast<unsigned>(std::time(nullptr)));
     clearScreen();
-    std::cout << CYAN << "[SYSTEM]: Initializing Audio & Cards..." << RESET << std::endl;
+    std::cout << CYAN << "[SYSTEM]: Initializing Audio & Game Mechanics..." << RESET << std::endl;
     std::this_thread::sleep_for(std::chrono::seconds(1));
 }
 
 inline void waitForEnter() {
     std::cout << "\n" << YELLOW << "Press ENTER to return to menu..." << RESET;
-    while (_getch() != 13);
+    while (_getch() != 13 && _getch() != 10);
 }
 
+// Reading text files from current root directory
 inline void showFile(std::string filename) {
-    clearScreen(); printHeader();
+    clearScreen(); 
+    printHeader();
     std::ifstream file(filename);
     if (file.is_open()) {
         std::string line;
         while (getline(file, line)) std::cout << line << std::endl;
         file.close();
+    } else {
+        std::cout << RED << "File not found: " << filename << RESET << std::endl;
     }
     waitForEnter();
 }
 
-// --- FIX 1: chooseOpponents() ---
-// Limits CPU count to 1-4 and sets startingRank = 10 - numCPUs (gives 9, 8, 7, 6)
 inline void chooseOpponents() {
     clearScreen();
     printHeader();
@@ -139,35 +160,10 @@ inline void chooseOpponents() {
             break;
         }
     }
-    startingRank = 10 - numCPUs; // 1 CPU -> rank 9, 2 -> 8, 3 -> 7, 4 -> 6
+    startingRank = 10 - numCPUs;
     std::cout << GREEN << "Playing against " << numCPUs << " CPU(s). "
               << "Deck starts from rank " << startingRank << "." << RESET << "\n";
     sleepMs(1200);
-}
-
-// --- BETTING & CPU LOGIC ---
-inline void placeBet() {
-    if (playerBalance <= 0) {
-        std::cout << RED << "\n[!] You're broke! The dealer grants you $200 charity.\n" << RESET;
-        playerBalance = 200;
-    }
-
-    while (true) {
-        std::cout << GREEN << BOLD << "\nCURRENT BALANCE: $" << playerBalance << RESET << std::endl;
-        std::cout << "Enter your bet amount: $";
-        if (!(std::cin >> currentBet)) {
-            std::cin.clear();
-            std::cin.ignore(1000, '\n');
-            std::cout << RED << "Invalid input. Enter a number." << RESET << std::endl;
-        } else if (currentBet <= 0) {
-            std::cout << RED << "Bet must be greater than 0." << RESET << std::endl;
-        } else if (currentBet > playerBalance) {
-            std::cout << RED << "Insufficient funds!" << RESET << std::endl;
-        } else {
-            break; 
-        }
-    }
-    std::cin.ignore(1000, '\n'); 
 }
 
 inline Decision cpuDecideBet(const std::vector<Card>& hand, const std::vector<Card>& table, 
@@ -177,7 +173,7 @@ inline Decision cpuDecideBet(const std::vector<Card>& hand, const std::vector<Ca
     int luck = rand() % 100;
     bool canRaise = (raisesSoFar < maxRaises);
     
-    if (table.size() < 3) { // Pre-flop
+    if (table.size() < 3) {
         if (currentBetToCall == 0) {
             if (canRaise && score > 2000000 && luck < 50) return {BetAction::RAISE, 20 + (rand() % 30)};
             return {BetAction::CHECK, 0};
@@ -187,7 +183,7 @@ inline Decision cpuDecideBet(const std::vector<Card>& hand, const std::vector<Ca
             if (score > 1000000 || currentBetToCall < 30) return {BetAction::CALL, 0};
             return (currentBetToCall > 40) ? Decision{BetAction::FOLD, 0} : Decision{BetAction::CALL, 0};
         }
-    } else { // Post-flop
+    } else {
         if (currentBetToCall == 0) {
             if (canRaise && score > 2000000 && luck < 60) return {BetAction::RAISE, 25 + (rand() % 35)};
             else if (canRaise && score > 1500000 && luck < 30) return {BetAction::RAISE, 15 + (rand() % 20)};
@@ -202,7 +198,6 @@ inline Decision cpuDecideBet(const std::vector<Card>& hand, const std::vector<Ca
     }
 }
 
-// --- HAND EVALUATION ---
 inline std::string getHandName(HandValue v) {
     switch(v) {
         case HIGH_CARD:      return "HIGH CARD";
@@ -219,15 +214,6 @@ inline std::string getHandName(HandValue v) {
     }
 }
 
-// FIX 3: Completely rewritten evaluateHand() with proper base-100 weighted scoring.
-// Scoring layout (all values use base 100 per "slot"):
-//   totalScore = handCategory * 100^5
-//              + primary rank   * 100^4   (quad rank / trip rank / pair rank / high card)
-//              + secondary rank * 100^3   (pair in full house / second pair in two-pair)
-//              + kicker1        * 100^2
-//              + kicker2        * 100^1
-//              + kicker3        * 100^0
-// This guarantees no overlap between any two distinct hands.
 inline HandResult evaluateHand(std::vector<Card> hand, std::vector<Card> table) {
     std::vector<Card> all = hand;
     all.insert(all.end(), table.begin(), table.end());
@@ -239,7 +225,6 @@ inline HandResult evaluateHand(std::vector<Card> hand, std::vector<Card> table) 
         suitMap[static_cast<int>(c.symbol)].push_back(static_cast<int>(c.rank));
     }
 
-    // --- Basic detection logic ---
     bool isFlush = false; std::vector<int> flushRanks; 
     for (auto& [s, rv] : suitMap) {
         if (rv.size() >= 5) {
@@ -270,11 +255,9 @@ inline HandResult evaluateHand(std::vector<Card> hand, std::vector<Card> table) 
         else singles.push_back(it->first);
     }
 
-    // --- POWER OF 100 SCORING SYSTEM ---
-    const long long B5 = 10000000000LL; // Category
-    const long long B4 = 100000000LL;   // Primary Rank
-    const long long B3 = 1000000LL;     // Secondary/Kicker 1
-    const long long B2 = 10000LL;       // Kicker 2
+    const long long B5 = 10000000000LL;
+    const long long B4 = 100000000LL;  
+    const long long B3 = 1000000LL;    
 
     HandValue v = HIGH_CARD; long long score = 0;
 
@@ -295,7 +278,7 @@ inline HandResult evaluateHand(std::vector<Card> hand, std::vector<Card> table) 
         v = STRAIGHT; score = (long long)v * B5 + straightHigh * B4;
     }
     else if (!trips.empty()) {
-        v = THREE_KIND; score = (long long)v * B5 + trips[0] * B4; // Now strictly > Two Pair
+        v = THREE_KIND; score = (long long)v * B5 + trips[0] * B4;
     }
     else if (pairs.size() >= 2) {
         v = TWO_PAIR; score = (long long)v * B5 + pairs[0] * B4 + pairs[1] * B3;
@@ -310,9 +293,6 @@ inline HandResult evaluateHand(std::vector<Card> hand, std::vector<Card> table) 
     return { v, (int)score, getHandName(v) };
 }
 
-// --- FIX 2: Deck constructor accepts minRank parameter ---
-// minRank: lowest rank integer to include (2-14). Default 2 = full deck.
-// 1 CPU -> minRank 9 (9,10,J,Q,K,A), 2 CPUs -> 8, 3 CPUs -> 7, 4 CPUs -> 6
 class Deck {
 private:
     std::vector<Card> cards;

@@ -1,6 +1,7 @@
-#include "functions.hpp"
-#include <windows.h>
+#define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
+
+#include "functions.hpp"
 #include <stdio.h>
 
 void refreshUI(const std::vector<Card>& pHand, const std::vector<Card>& table,
@@ -25,35 +26,35 @@ void refreshUI(const std::vector<Card>& pHand, const std::vector<Card>& table,
     std::cout << "\n----------------------------------------\n";
 }
 
-// Helper: stop background music, play a one-shot sound, then restart background music.
-void playOneShot(ma_engine* pMainEngine, const char* file) {
-    ma_engine_stop(pMainEngine);
-    ma_engine eng;
-    ma_engine_init(NULL, &eng);
-    ma_engine_play_sound(&eng, file, NULL);
-    sleepMs(4000);
-    ma_engine_uninit(&eng);
-    ma_engine_start(pMainEngine);
+// Global audio helper using pre-allocated single-engine audio nodes
+void playOneShot(ma_sound* pSound, ma_sound* pBgm, int durationMs) {
+    if (pBgm) ma_sound_stop(pBgm);
+    if (pSound) {
+        ma_sound_seek_to_pcm_frame(pSound, 0);
+        ma_sound_start(pSound);
+    }
+    sleepMs(durationMs);
+    if (pSound) ma_sound_stop(pSound);
+    if (pBgm) ma_sound_start(pBgm);
 }
 
-// Returns true if the round continues (no one folded to end it early),
-// false if the player folded or all CPUs folded (round is over).
 bool bettingRound(std::vector<Card>& pHand,
                   std::vector<std::vector<Card>>& cpuHands,
                   const std::vector<Card>& table,
                   std::string phase,
                   std::vector<bool>& cpuActive,
-                  ma_engine* pMainEngine) {
+                  ma_sound* pWinSfx,
+                  ma_sound* pLossSfx,
+                  ma_sound* pBgm) {
     int betToCall  = 0;
     int raiseCount = 0;
     bool playerActive = true;
     bool firstTime    = true;
-    int  lastRaiser   = -1; // -1=none, 0=player, 1..N=cpu index+1
+    int  lastRaiser   = -1;
 
     while (firstTime || lastRaiser != -1) {
         firstTime = false;
 
-        // --- Player Turn ---
         if (playerActive && lastRaiser != 0) {
             refreshUI(pHand, table, phase + " - YOUR TURN", betToCall, raiseCount);
 
@@ -78,7 +79,7 @@ bool bettingRound(std::vector<Card>& pHand,
                 std::cout << RED << "You fold." << RESET << "\n";
                 playerActive = false;
                 sleepMs(1000);
-                playOneShot(pMainEngine, "loss.wav");
+                playOneShot(pLossSfx, pBgm, 3000);
                 return false;
             } else if (cmd == 'C') {
                 if (betToCall > 0) {
@@ -89,7 +90,6 @@ bool bettingRound(std::vector<Card>& pHand,
                     std::cout << GREEN << "You check." << RESET << "\n";
                 }
                 sleepMs(800);
-                // If a CPU was the last to raise and player just called, end round
                 if (lastRaiser > 0) { lastRaiser = -1; break; }
             } else if (cmd == 'R') {
                 if (raiseCount >= MAX_RAISES) {
@@ -118,12 +118,10 @@ bool bettingRound(std::vector<Card>& pHand,
             }
         }
 
-        // --- CPU Turns ---
         bool anyActiveCpu = false;
         for (int i = 0; i < numCPUs; ++i) {
             if (!cpuActive[i]) continue;
             anyActiveCpu = true;
-            // Skip the CPU that just raised (don't let it act again in the same pass)
             if (lastRaiser == i + 1) continue;
 
             refreshUI(pHand, table, phase + " - CPU " + std::to_string(i + 1) + " TURN",
@@ -133,7 +131,6 @@ bool bettingRound(std::vector<Card>& pHand,
 
             Decision d = cpuDecideBet(cpuHands[i], table, betToCall, raiseCount, MAX_RAISES);
 
-            // Enforce raise cap
             if (d.action == BetAction::RAISE && raiseCount >= MAX_RAISES)
                 d.action = BetAction::CALL;
 
@@ -163,9 +160,7 @@ bool bettingRound(std::vector<Card>& pHand,
             }
         }
 
-        // If all CPUs folded, player wins the pot
         if (!anyActiveCpu && playerActive) {
-            // Count remaining active CPUs after this pass
             bool allFolded = true;
             for (int i = 0; i < numCPUs; ++i)
                 if (cpuActive[i]) { allFolded = false; break; }
@@ -174,28 +169,25 @@ bool bettingRound(std::vector<Card>& pHand,
                 playerBalance += pot;
                 pot = 0;
                 sleepMs(50);
-                playOneShot(pMainEngine, "win.wav");
+                playOneShot(pWinSfx, pBgm, 4000);
                 return false;
             }
         }
 
-        // If player raised and all CPUs have now responded, round ends
         if (lastRaiser == 0) {
             bool allResponded = true;
             for (int i = 0; i < numCPUs; ++i)
                 if (cpuActive[i]) { allResponded = false; break; }
             if (allResponded) break;
-            // else keep going so CPUs can call/raise
             lastRaiser = -1;
         }
 
-        // If no one raised this full pass, the round is over
         if (lastRaiser == -1) break;
     }
     return true;
 }
 
-void playGame(ma_engine* pMainEngine) {
+void playGame(ma_sound* pWinSfx, ma_sound* pLossSfx, ma_sound* pBgm) {
     clearScreen();
     printHeader();
     srand(time(nullptr));
@@ -213,7 +205,6 @@ void playGame(ma_engine* pMainEngine) {
 
     std::vector<Card> playerHand = {myDeck.drawCard(), myDeck.drawCard()};
 
-    // Deal one hand per CPU
     std::vector<std::vector<Card>> cpuHands(numCPUs);
     std::vector<bool> cpuActive(numCPUs, true);
     for (int i = 0; i < numCPUs; ++i)
@@ -222,27 +213,27 @@ void playGame(ma_engine* pMainEngine) {
     std::vector<Card> tableCards;
 
     // Pre-flop
-    if (!bettingRound(playerHand, cpuHands, tableCards, "PRE-FLOP", cpuActive, pMainEngine)) return;
+    if (!bettingRound(playerHand, cpuHands, tableCards, "PRE-FLOP", cpuActive, pWinSfx, pLossSfx, pBgm)) return;
 
     // FLOP
     for (int i = 0; i < 3 && !myDeck.isEmpty(); ++i) tableCards.push_back(myDeck.drawCard());
     std::cout << "\nDealing the FLOP..." << std::endl;
     sleepMs(1500);
-    if (!bettingRound(playerHand, cpuHands, tableCards, "FLOP", cpuActive, pMainEngine)) return;
+    if (!bettingRound(playerHand, cpuHands, tableCards, "FLOP", cpuActive, pWinSfx, pLossSfx, pBgm)) return;
 
     // TURN
     if (!myDeck.isEmpty()) tableCards.push_back(myDeck.drawCard());
     std::cout << "\nDealing the TURN..." << std::endl;
     sleepMs(1500);
-    if (!bettingRound(playerHand, cpuHands, tableCards, "TURN", cpuActive, pMainEngine)) return;
+    if (!bettingRound(playerHand, cpuHands, tableCards, "TURN", cpuActive, pWinSfx, pLossSfx, pBgm)) return;
 
     // RIVER
     if (!myDeck.isEmpty()) tableCards.push_back(myDeck.drawCard());
     std::cout << "\nDealing the RIVER..." << std::endl;
     sleepMs(1500);
-    if (!bettingRound(playerHand, cpuHands, tableCards, "RIVER", cpuActive, pMainEngine)) return;
+    if (!bettingRound(playerHand, cpuHands, tableCards, "RIVER", cpuActive, pWinSfx, pLossSfx, pBgm)) return;
 
-    // --- SHOWDOWN ---
+    // SHOWDOWN
     clearScreen();
     printHeader();
     std::cout << RED << BOLD << "\n*** SHOWDOWN ***" << RESET << "\n\n";
@@ -253,9 +244,8 @@ void playGame(ma_engine* pMainEngine) {
     for (const auto& c : playerHand) c.print();
     std::cout << " (" << playerResult.name << ")\n";
 
-    // Evaluate each active CPU
-    int overallWinner = 0; // 0 = player wins by default
-    HandResult bestCpuResult = playerResult; // start benchmark at player score
+    int overallWinner = 0; 
+    HandResult bestCpuResult = playerResult; 
     int bestCpuIndex = -1;
 
     for (int i = 0; i < numCPUs; ++i) {
@@ -272,37 +262,21 @@ void playGame(ma_engine* pMainEngine) {
         if (cpuResult.totalScore > bestCpuResult.totalScore) {
             bestCpuResult = cpuResult;
             bestCpuIndex  = i;
-            overallWinner = 1; // a CPU is currently winning
+            overallWinner = 1; 
         } else if (cpuResult.totalScore == playerResult.totalScore && overallWinner == 0) {
-            overallWinner = -1; // draw with player (so far)
+            overallWinner = -1; 
         }
     }
     std::cout << "\n";
 
-    // Determine final outcome
-    // overallWinner: 0=player, 1=a CPU won, -1=draw
     if (overallWinner == 0) {
         playerBalance += pot;
         std::cout << GREEN << BOLD << ">> YOU WIN $" << pot << " with " << playerResult.name << "! <<" << RESET << "\n";
-
-        ma_engine_stop(pMainEngine);
-        ma_engine eng;
-        ma_engine_init(NULL, &eng);
-        ma_engine_play_sound(&eng, "win.wav", NULL);
-        sleepMs(5000);
-        ma_engine_uninit(&eng);
-        ma_engine_start(pMainEngine);
+        playOneShot(pWinSfx, pBgm, 4000);
     } else if (overallWinner == 1) {
         std::cout << RED << BOLD << ">> CPU " << (bestCpuIndex + 1) << " WINS $" << pot
                   << " with " << bestCpuResult.name << "! <<" << RESET << "\n";
-
-        ma_engine_stop(pMainEngine);
-        ma_engine eng;
-        ma_engine_init(NULL, &eng);
-        ma_engine_play_sound(&eng, "loss.wav", NULL);
-        sleepMs(5000);
-        ma_engine_uninit(&eng);
-        ma_engine_start(pMainEngine);
+        playOneShot(pLossSfx, pBgm, 4000);
     } else {
         playerBalance += pot / 2;
         std::cout << YELLOW << BOLD << ">> DRAW! Pot split. You receive $" << pot / 2 << "." << RESET << std::endl;
@@ -316,13 +290,21 @@ void playGame(ma_engine* pMainEngine) {
 int main() {
     bootingSequence();
 
-    ma_engine engine1;
-    if (ma_engine_init(NULL, &engine1) != MA_SUCCESS) return -1;
+    ma_engine engine;
+    ma_sound bgSound, winSound, lossSound;
+    bool audioReady = false;
 
-    ma_sound bgSound;
-    if (ma_sound_init_from_file(&engine1, "sound.wav", MA_SOUND_FLAG_STREAM, NULL, NULL, &bgSound) == MA_SUCCESS) {
-        ma_sound_set_looping(&bgSound, true);
-        ma_sound_start(&bgSound);
+    // Single global audio engine initialization
+    if (ma_engine_init(NULL, &engine) == MA_SUCCESS) {
+        bool bgmOk  = (ma_sound_init_from_file(&engine, "sound.wav", MA_SOUND_FLAG_STREAM, NULL, NULL, &bgSound) == MA_SUCCESS);
+        bool winOk  = (ma_sound_init_from_file(&engine, "win.wav", MA_SOUND_FLAG_DECODE, NULL, NULL, &winSound) == MA_SUCCESS);
+        bool lossOk = (ma_sound_init_from_file(&engine, "loss.wav", MA_SOUND_FLAG_DECODE, NULL, NULL, &lossSound) == MA_SUCCESS);
+
+        if (bgmOk && winOk && lossOk) {
+            ma_sound_set_looping(&bgSound, true);
+            ma_sound_start(&bgSound);
+            audioReady = true;
+        }
     }
 
     chooseOpponents();
@@ -341,20 +323,24 @@ int main() {
         }
 
         int key = _getch();
-        if (key == 224) {
+        if (key == 224 || key == 27) {
+            if (key == 27) { _getch(); }
             key = _getch();
-            if (key == 72) choice = (choice - 1 + 4) % 4;
-            if (key == 80) choice = (choice + 1) % 4;
-        } else if (key == 13) {
-            if      (choice == 0) playGame(&engine1);
-            else if (choice == 1) showFile(".files\\rules.txt");
-            else if (choice == 2) showFile(".files\\points.txt");
+            if (key == 72 || key == 'A') choice = (choice - 1 + 4) % 4;
+            if (key == 80 || key == 'B') choice = (choice + 1) % 4;
+        } else if (key == 13 || key == 10) {
+            if      (choice == 0) playGame(audioReady ? &winSound : nullptr, audioReady ? &lossSound : nullptr, audioReady ? &bgSound : nullptr);
+            else if (choice == 1) showFile("rules.txt");
+            else if (choice == 2) showFile("points.txt");
             else if (choice == 3) break;
         }
     }
 
-    ma_sound_stop(&bgSound);
-    ma_sound_uninit(&bgSound);
-    ma_engine_uninit(&engine1);
+    if (audioReady) {
+        ma_sound_uninit(&bgSound);
+        ma_sound_uninit(&winSound);
+        ma_sound_uninit(&lossSound);
+        ma_engine_uninit(&engine);
+    }
     return 0;
 }
