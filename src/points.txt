@@ -1,0 +1,18 @@
+Hand Rankings (High to Low)
+
+Royal Flush: A, K, Q, J, 10 (all same suit).
+Straight Flush: Five cards in sequence (same suit).
+Four of a Kind (Quads): Four cards of the same rank.
+Full House: Three of a kind plus a pair.
+Flush: Any five cards of the same suit.
+Straight: Five cards in sequence (different suits).
+Three of a Kind (Set/Trips): Three cards of the same rank.
+Two Pair: Two different pairs.
+One Pair: Two cards of the same rank.
+High Card: The highest card in the hand if no other set is made.
+
+Card Reference (Suits ranked from high to low)
+Hearts (♥️)
+Diamonds (♦️)
+Clubs (♣️)
+Spades (♠️)
